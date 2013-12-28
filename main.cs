@@ -613,6 +613,15 @@ namespace IpHlpApidotnet
 
         #region ThreadWorkers
 
+        // Time for sleep thread after processing all records
+        private int _ThreadWaitTimeSec = 2;
+
+        public int ThreadIdleTimeSec
+        {
+            get { return _ThreadWaitTimeSec; }
+            set { _ThreadWaitTimeSec = value; }
+        }
+
         private object _singleRefreshHostNameThread = new object();
         private void ThreadRefreshHostName()
         {
@@ -651,24 +660,45 @@ namespace IpHlpApidotnet
                         // If all connections has host name, then wait
                         if (unknown_ip == String.Empty)
                         {
-                            Thread.Sleep(2000);
+                            Thread.Sleep(ThreadIdleTimeSec * 1000);
                             continue;
                         }
+
                         Utils.FillHostNameCache(unknown_ip);
 
-                        if (is_local)
+                        // Size of collection can be changed, while await dns response
+                        try
                         {
-                            if (_list[unknown_selected_index].Local.Address.ToString() == unknown_ip)
+                            if (unknown_selected_index < _list.Count)
                             {
-                                temp = _list[unknown_selected_index].LocalAddress;
+                                if (is_local)
+                                {
+                                    foreach (var connection in _list)
+                                    {
+                                        if (connection.Local.Address.ToString() == unknown_ip)
+                                        {
+                                            temp = connection.LocalAddress;
+                                        }
+                                        /*
+                                        if (_list[unknown_selected_index].Local.Address.ToString() == unknown_ip)
+                                        {
+                                            temp = _list[unknown_selected_index].LocalAddress;
+                                        }
+                                        */
+                                    }
+                                }
+                                else
+                                {
+                                    if (_list[unknown_selected_index].Remote.Address.ToString() == unknown_ip)
+                                    {
+                                        temp = _list[unknown_selected_index].RemoteAddress;
+                                    }
+                                }
                             }
                         }
-                        else
+                        catch (Exception)
                         {
-                            if (_list[unknown_selected_index].Remote.Address.ToString() == unknown_ip)
-                            {
-                                temp = _list[unknown_selected_index].RemoteAddress;
-                            }
+                            continue;
                         }
                     }
 
@@ -683,6 +713,8 @@ namespace IpHlpApidotnet
         public void RunRefreshHostName()
         {
             Thread RefreshHostNameThread = new Thread(ThreadRefreshHostName);
+
+            // Make thread background. Thread close, when main app thred is finish.
             RefreshHostNameThread.IsBackground = true;
             RefreshHostNameThread.Start();
         }
@@ -1075,7 +1107,7 @@ namespace IpHlpApidotnet
         {
             try
             {
-                if (HostAddress.Address.Address == 0)//ToString() == "0.0.0.0")
+                if (HostAddress.Address.ToString() == "0.0.0.0") //.Address == 0)
                 {
                     if (HostAddress.Port > 0)
                         return LocalHostName + ":" + HostAddress.Port.ToString();
@@ -1089,6 +1121,10 @@ namespace IpHlpApidotnet
                 return HostAddress.ToString();
             }
         }
+
+        private delegate IPHostEntry GetHostEntryHandler(string ip);
+        //DNS response time in sec
+        private static int DnsWaitTimeSec = 3;
 
         public static string GetLocalHostName()
         {
@@ -1106,31 +1142,61 @@ namespace IpHlpApidotnet
                     return pair.Value;
             }
 
-            var newHostName = Dns.GetHostEntry(hostNameOrAddress).HostName;
-            _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+            var newHostName = "unresolve";
+            try
+            {
+                GetHostEntryHandler callback = new GetHostEntryHandler(Dns.GetHostEntry);
+                IAsyncResult result = callback.BeginInvoke(hostNameOrAddress, null, null);
 
-            return newHostName;
+                // Wait dns response certain amount of time
+                if (result.AsyncWaitHandle.WaitOne(DnsWaitTimeSec * 1000, false))
+                {
+                    newHostName = callback.EndInvoke(result).HostName;
+                }
+                _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+                return newHostName;
+            }
+            catch (Exception)
+            {
+                _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+                return newHostName;
+            }
         }
 
         // Together with GetHostName can generate duplications in cache.
         // It decrease efficiency of cache, but not generate an error.
         public static bool FillHostNameCache(string hostNameOrAddress)
         {
+            foreach (var pair in _HostNames.ToArray())
+            {
+                if (pair.Key == hostNameOrAddress)
+                    return false;
+            }
+
+            var newHostName = "unresolve";
             try
             {
-                foreach (var pair in _HostNames.ToArray())
-                {
-                    if (pair.Key == hostNameOrAddress)
-                        return false;
-                }
-                
-                var newHostName = Dns.GetHostEntry(hostNameOrAddress).HostName;
-                _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+                // Waiting time in sec
+                int DnsWaitTimeSec = 3;
+                GetHostEntryHandler callback = new GetHostEntryHandler(Dns.GetHostEntry);
+                IAsyncResult result = callback.BeginInvoke(hostNameOrAddress, null, null);
 
-                return true;
+                // Wait dns response while 1sec
+                if (result.AsyncWaitHandle.WaitOne(DnsWaitTimeSec * 1000, false))
+                {
+                    newHostName = callback.EndInvoke(result).HostName;
+                    _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+                    return true;
+                }
+                else
+                {
+                    _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
+                    return false;
+                }
             }
-            catch
+            catch (Exception)
             {
+                _HostNames.Add(new KeyValuePair<string, string>(hostNameOrAddress, newHostName));
                 return false;
             }
         }
